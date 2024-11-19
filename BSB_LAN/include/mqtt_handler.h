@@ -196,7 +196,7 @@ bool mqtt_connect() {
   if(MQTTPubSubClient == NULL) {
     mqtt_client= new ComClient();
     MQTTPubSubClient = new PubSubClient(mqtt_client[0]);
-    MQTTPubSubClient->setBufferSize(1024);
+    MQTTPubSubClient->setBufferSize(2048);
     mqtt_reconnect_timer = 0;
     first_connect = true;
   }
@@ -462,6 +462,9 @@ boolean mqtt_send_discovery(boolean create=true) {
             appendStringBuffer(&sb_topic, "sensor/");
             if (decodedTelegram.unit[0]) {
               appendStringBuffer(&sb_payload, "\"unit_of_measurement\":\"%s\",", decodedTelegram.unit);
+              if (strcmp(decodedTelegram.unit, U_HOUR) && strcmp(decodedTelegram.unit, U_KWH)) {    // do not add state_class for potentially cumulative parameters 
+                appendStringBuffer(&sb_payload, "\"state_class\":\"measurement\",");
+              }
             }
             sensor_type = MQTT_SENSOR;
           }
