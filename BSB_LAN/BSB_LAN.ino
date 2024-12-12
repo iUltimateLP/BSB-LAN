@@ -19,6 +19,10 @@
 #error "Sorry, Arduino Mega not supported since BSB-LAN 2.1"
 #endif
 
+#if defined(ESP32) && !defined(ARDUINO_PARTITION_min_spiffs)
+  #error "Wrong partition scheme selected! You have to select Minimal/SPIFFS! Please, please, please(!) do read the manual at docs.bsb-lan.de - if you don't even read the quickstart instructions, you _will_ not be able to run BSB-LAN! Thank you."
+#endif
+
 #include <Arduino.h>
 
 #define ESP32_OLIMEX 1
@@ -113,6 +117,15 @@ typedef struct {
   int16_t dest_addr;
 } parameter;
 
+typedef struct {
+  uint16_t dev_fam;
+  uint16_t dev_var;
+  uint8_t dev_id;
+  uint32_t dev_serial;
+  char name[33];
+} device_map;
+device_map dev_lookup[10];
+
 // Forward declarations
 #if defined(ESP32)
 uint64_t usedBytes();
@@ -137,7 +150,7 @@ void connectToMaxCul();
 void SetDevId();
 void mqtt_callback(char* topic, byte* payload, unsigned int length);  //Luposoft: predefintion
 void mqtt_sendtoBroker(parameter param);
-void printKat(uint8_t cat, int print_val, boolean debug_output=true);
+uint32_t printKat(uint8_t cat, int print_val, boolean debug_output=true);
 
 #include "src/Base64/src/Base64.h"
 
@@ -146,7 +159,7 @@ void printKat(uint8_t cat, int print_val, boolean debug_output=true);
 #include "BSB_LAN_config.h"
 #include "BSB_LAN_defs.h"
 
-#define REQUIRED_CONFIG_VERSION 38
+#define REQUIRED_CONFIG_VERSION 39
 #if CONFIG_VERSION < REQUIRED_CONFIG_VERSION
   #error "Your BSB_LAN_config.h is not up to date! Please use the most recent BSB_LAN_config.h.default, rename it to BSB_LAN_config.h and make the necessary changes to this new one." 
 #endif
@@ -457,7 +470,8 @@ uint_farptr_t data_type_descaddr; //data type description DT_*, dt_types_text[?]
 uint16_t enumstr_len;  //enum length
 uint16_t error; //0 - ok, 7 - parameter not supported, 1-255 - LPB/BSB bus errors, 256 - decoding error, 257 - unknown command, 258 - not found, 259 - no enum str, 260 - unknown type, 261 - query failed, 262 - Too few/many arguments in SET command, 263 - invalid category
 uint8_t msg_type; //telegram type
-uint8_t tlg_addr; //telegram address
+uint8_t src_addr; //telegram address
+uint8_t dest_addr; //telegram address
 uint16_t flags; //flags
 uint8_t readwrite; // 0 - read/write, 1 - read only, 2 - write only
 uint8_t isswitch; // 0 - Any type, 1 - ONOFF or YESNO type
@@ -466,6 +480,7 @@ uint8_t data_type; //data type DT_*, optbl[?].data_type
 uint8_t precision;//optbl[?].precision
 uint8_t enable_byte;//optbl[?].enable_byte
 uint8_t payload_length;//optbl[?].payload_length
+uint8_t payload[33];
 uint8_t sensorid; //id of external (OneWire, DHT, BME, MAX!) sensor for virtual programs. Must be zero for real program numbers.
 // uint8_t unit_len;//optbl[?].unit_len. internal variable
 float operand; //optbl[?].operand
@@ -476,7 +491,7 @@ char *telegramDump; //Telegram dump for debugging in case of error. Dynamic allo
 
 uint8_t my_dev_fam = DEV_FAM(DEV_NONE);
 uint8_t my_dev_var = DEV_VAR(DEV_NONE);
-uint32_t my_dev_id = 0;
+uint32_t my_dev_serial = 0;
 uint8_t default_flag = DEFAULT_FLAG;  // necessary for ESP32 SDK 2.0.4 and above to prevent tautological-compare errors
 
 
@@ -708,14 +723,14 @@ void printHTTPheader(uint16_t code, int mimetype, bool addcharset, bool isGzip, 
   printToWebClient("\r\n");
   if (isDownload) {
     printToWebClient("Content-Disposition: attachment; filename=\"BSB-LAN-");
-    printFmtToWebClient("%03u-%03u-%u.txt\"\r\n", my_dev_fam, my_dev_var, my_dev_id);
+    printFmtToWebClient("%03u-%03u-%u.txt\"\r\n", my_dev_fam, my_dev_var, my_dev_serial);
   }
 }
 
 
 int recognize_mime(char *str) {
 //        if (strlen(dot)) {
-  char mimebuf[32];
+  char mimebuf[64];
   int i = 0;
   int mimetype = 0;
   if (!str) return mimetype;
@@ -741,7 +756,7 @@ int recognize_mime(char *str) {
 //          else mimetype = 0;
   // You can add more MIME types here
   return mimetype;
-  }
+}
 
 
 void setBusType() {
@@ -804,46 +819,48 @@ const char *prefix - print string before enum element
  * Global resources used:
  *  none
  * *************************************************************** */
-void listEnumValues(uint_farptr_t enumstr, uint16_t enumstr_len, const char *prefix, const char *delimiter, const char *alt_delimiter, const char *suffix, const char *string_delimiter, uint16_t value, uint8_t print_mode, bool canBeDisabled) {
+void listEnumValues(uint_farptr_t enumstr, uint16_t enumstr_len, const char *prefix, const char *delimiter, const char *alt_delimiter, const char *suffix, const char *string_delimiter, uint16_t value, uint8_t print_mode) {
   uint16_t val = 0;
   uint16_t c=0;
   uint8_t bitmask=0;
   bool isFirst = true;
   if (decodedTelegram.type == VT_CUSTOM_BIT) c++;  // first byte of VT_CUSTOM_BIT enumstr contains index to payload
-  if (decodedTelegram.enable_byte == 1) canBeDisabled = true; // Apparently, (some) read-only VT_BINARY_ENUM parameters can still be transmitted as "disabled" by the controller, so we have to take care for this here.
 
   while (c + 2 < enumstr_len) {
-    if ((byte)(pgm_read_byte_far(enumstr+c+2))==' ') { // ENUMs must not contain two consecutive spaces! Necessary because VT_BIT bitmask may be 0x20 which equals space
-      val = uint16_t(pgm_read_byte_far(enumstr+c+1));
-      if (decodedTelegram.type != VT_CUSTOM_ENUM) val |= uint16_t((pgm_read_byte_far(enumstr+c) << 8));
-      if (print_mode & PRINT_ENUM_AS_DT_BITS) { //decodedTelegram.data_type is DT_BITS
-        bitmask = val & 0xff;
-        val = val >> 8 & 0xff;
-      }
-      c++;
-    } else if ((byte)(pgm_read_byte_far(enumstr+c+1))==' ') {
-      val=uint16_t(pgm_read_byte_far(enumstr+c));
-    }
-    //skip leading space
-    c+=2;
-    if ((print_mode & PRINT_ONLY_VALUE_LINE) && val != value) {
-      while(c < enumstr_len){
-        if ((byte)(pgm_read_byte_far(enumstr+c)) == '\0'){
-          break;
-        }
-        c++;
-      }
-      continue;
-    }
-    if (isFirst) {isFirst = false;} else {if (string_delimiter) printToWebClient(string_delimiter);}
-    if (prefix) printToWebClient(prefix);
     uint_farptr_t descAddr;
-    if (canBeDisabled) {
+    if ((decodedTelegram.type == VT_ENUM || decodedTelegram.isswitch == true) && (decodedTelegram.enable_byte > 1 || decodedTelegram.payload[0] == 0x01) && isFirst == true) {
       val = 65535;
+      value = 65535;
       descAddr = STR_DISABLED;
     } else {
+      if ((byte)(pgm_read_byte_far(enumstr+c+2))==' ') { // ENUMs must not contain two consecutive spaces! Necessary because VT_BIT bitmask may be 0x20 which equals space
+        val = uint16_t(pgm_read_byte_far(enumstr+c+1));
+        if (decodedTelegram.type != VT_CUSTOM_ENUM) val |= uint16_t((pgm_read_byte_far(enumstr+c) << 8));
+        if (print_mode & PRINT_ENUM_AS_DT_BITS) { //decodedTelegram.data_type is DT_BITS
+          bitmask = val & 0xff;
+          val = val >> 8 & 0xff;
+        }
+        c++;
+      } else if ((byte)(pgm_read_byte_far(enumstr+c+1))==' ') {
+        val=uint16_t(pgm_read_byte_far(enumstr+c));
+      }
+      //skip leading space
+      c+=2;
+      if ((print_mode & PRINT_ONLY_VALUE_LINE) && val != value) {
+        while(c < enumstr_len){
+          if ((byte)(pgm_read_byte_far(enumstr+c)) == '\0'){
+            break;
+          }
+          c++;
+        }
+        continue;
+      }
       descAddr = enumstr + c;
     }
+
+    if (isFirst) {isFirst = false;} else {if (string_delimiter) printToWebClient(string_delimiter);}
+    if (prefix) printToWebClient(prefix);
+
     if (print_mode & PRINT_DESCRIPTION && print_mode & PRINT_DESCRIPTION_FIRST) {
       c += printToWebClient(descAddr) + 1;
       //                      All enums except DT_BITS                                         DT_BITS  enums
@@ -864,8 +881,7 @@ void listEnumValues(uint_farptr_t enumstr, uint16_t enumstr_len, const char *pre
       c += printToWebClient(descAddr) + 1;
     }
     if (suffix) printToWebClient(suffix);
-    if (canBeDisabled) {canBeDisabled = false; c = 0;}
-
+    if (descAddr == STR_DISABLED) c = 0;
   }
 }
 
@@ -894,6 +910,9 @@ inline uint8_t get_cmdtbl_category(int i) {
 }
 
 void set_temp_destination(int16_t destAddr){
+  if (destAddr == -1) {
+    destAddr = dest_address;
+  }
   if (destAddr != bus->getBusDest()) {
     printFmtToDebug("Setting temporary destination to %d\r\n", destAddr);
     bus->setBusType(bus->getBusType(), bus->getBusAddr(), destAddr);
@@ -1337,6 +1356,7 @@ void resetDecodedTelegram() {
   decodedTelegram.precision = 1;
   decodedTelegram.enable_byte = 0;
   decodedTelegram.payload_length = 0;
+  decodedTelegram.payload[0] = 0;
   decodedTelegram.error = 0;
   decodedTelegram.readwrite = FL_WRITEABLE;
   decodedTelegram.isswitch = 0;
@@ -1345,7 +1365,8 @@ void resetDecodedTelegram() {
   decodedTelegram.enumstr_len = 0;
   decodedTelegram.enumstr = 0;
   decodedTelegram.msg_type = 0;
-  decodedTelegram.tlg_addr = 0;
+  decodedTelegram.src_addr = 0;
+  decodedTelegram.dest_addr = 0;
   decodedTelegram.operand = 1;
   decodedTelegram.sensorid = 0;
   if (decodedTelegram.telegramDump) {free(decodedTelegram.telegramDump); decodedTelegram.telegramDump = NULL;} //free memory before new telegram
@@ -2263,9 +2284,9 @@ void printConfigWebPossibleValues(int i, uint16_t temp_value, bool printCurrentS
   uint16_t enumstr_len=cmdtbl[i].enumstr_len;
   uint_farptr_t enumstr = cmdtbl[i].enumstr;
   if(printCurrentSelectionOnly){
-    listEnumValues(enumstr, enumstr_len, NULL, NULL, NULL, NULL, NULL, temp_value, PRINT_DESCRIPTION|PRINT_VALUE_FIRST|PRINT_ONLY_VALUE_LINE, DO_NOT_PRINT_DISABLED_VALUE);
+    listEnumValues(enumstr, enumstr_len, NULL, NULL, NULL, NULL, NULL, temp_value, PRINT_DESCRIPTION|PRINT_VALUE_FIRST|PRINT_ONLY_VALUE_LINE);
   } else {
-    listEnumValues(enumstr, enumstr_len, STR_OPTION_VALUE, "'>", STR_SELECTED, STR_CLOSE_OPTION, NULL, temp_value, PRINT_VALUE|PRINT_DESCRIPTION|PRINT_VALUE_FIRST, DO_NOT_PRINT_DISABLED_VALUE);
+    listEnumValues(enumstr, enumstr_len, STR_OPTION_VALUE, "'>", STR_SELECTED, STR_CLOSE_OPTION, NULL, temp_value, PRINT_VALUE|PRINT_DESCRIPTION|PRINT_VALUE_FIRST);
   }
 }
 
@@ -2357,7 +2378,7 @@ void generateWebConfigPage(bool printOnly) {
             if (i > 0) {
               uint16_t enumstr_len=cmdtbl[i].enumstr_len;
               uint_farptr_t enumstr = cmdtbl[i].enumstr;
-              listEnumValues(enumstr, enumstr_len, "<label style='display:flex;flex-direction:row;justify-content:flex-start;align-items:center'><input type='checkbox' style='width:40px;' onclick=\"bvc(this,", ")\">", ")\" checked>", "</label>", NULL, variable[0], PRINT_DESCRIPTION|PRINT_VALUE|PRINT_VALUE_FIRST|PRINT_ENUM_AS_DT_BITS, DO_NOT_PRINT_DISABLED_VALUE);
+              listEnumValues(enumstr, enumstr_len, "<label style='display:flex;flex-direction:row;justify-content:flex-start;align-items:center'><input type='checkbox' style='width:40px;' onclick=\"bvc(this,", ")\">", ")\" checked>", "</label>", NULL, variable[0], PRINT_DESCRIPTION|PRINT_VALUE|PRINT_VALUE_FIRST|PRINT_ENUM_AS_DT_BITS);
             }
             break;}
           case CPI_DROPDOWN:{
@@ -2444,7 +2465,7 @@ void printConfigJSONPossibleValues(int i, bool its_a_bits_enum) {
   uint_farptr_t enumstr = cmdtbl[i].enumstr;
   listEnumValues(enumstr, enumstr_len, "      { \"enumValue\": \"", "\", \"desc\": \"", NULL, "\" }", ",\r\n", 0,
     its_a_bits_enum?PRINT_VALUE|PRINT_DESCRIPTION|PRINT_VALUE_FIRST|PRINT_ENUM_AS_DT_BITS:
-    PRINT_VALUE|PRINT_DESCRIPTION|PRINT_VALUE_FIRST, DO_NOT_PRINT_DISABLED_VALUE);
+    PRINT_VALUE|PRINT_DESCRIPTION|PRINT_VALUE_FIRST);
   printToWebClient("\r\n      ]");
 }
 
@@ -2860,10 +2881,8 @@ int set(float line      // the ProgNr of the heater parameter
         // Default values if not requested otherwise
         int h1s=0xFF,m1s=0xFF,h2s=0xFF,m2s=0xFF,h3s=0xFF,m3s=0xFF;
         int h1e=0xFF,m1e=0xFF,h2e=0xFF,m2e=0xFF,h3e=0xFF,m3e=0xFF;
-        int ret;
-        ret=sscanf(val,"%d:%d-%d:%d_%d:%d-%d:%d_%d:%d-%d:%d",&h1s,&m1s,&h1e,&m1e,&h2s,&m2s,&h2e,&m2e,&h3s,&m3s,&h3e,&m3e);
         // we need at least the first period
-        if (ret<4) {     // BEGIN hour/minute and END hour/minute
+        if (sscanf(val,"%d:%d-%d:%d%*c%d:%d-%d:%d%*c%d:%d-%d:%d",&h1s,&m1s,&h1e,&m1e,&h2s,&m2s,&h2e,&m2e,&h3s,&m3s,&h3e,&m3e)<4) {     // BEGIN hour/minute and END hour/minute
           return 0;
         }
         pps_values[cmd_no] = (h1s==0xFF || h1e==0xFF)?0xFF:h1s * 6 + m1s / 10;
@@ -3003,6 +3022,8 @@ int set(float line      // the ProgNr of the heater parameter
     case VT_AMP:
     case VT_CUBICMETER:
     case VT_MINUTES:
+    case VT_HOURS:
+    case VT_HOURS_N:
     case VT_TEMP_DWORD:
       {
       char* val1 = (char *)val;
@@ -3027,7 +3048,7 @@ int set(float line      // the ProgNr of the heater parameter
       for (int x=decodedTelegram.payload_length;x>0;x--) {
         param[decodedTelegram.payload_length-x+1] = (t >> ((x-1)*8)) & 0xff;
       }
-      if (val[0] == '\0' || (decodedTelegram.type == VT_ENUM && t == 0xFFFF)) {
+      if (val[0] == '\0' || (decodedTelegram.type == VT_ENUM && t == 0xFFFF) || !strcmp(val, "---")) {
         param[0]=decodedTelegram.enable_byte-1;  // disable
       } else {
         param[0]=decodedTelegram.enable_byte;  //enable
@@ -3042,7 +3063,7 @@ int set(float line      // the ProgNr of the heater parameter
     case VT_DWORD_N:
     case VT_DWORD10:
       {
-      if (val[0]!='\0') {
+      if (val[0]!='\0' && strcmp(val, "---")) {
         uint32_t t = (uint32_t)strtoul(val, NULL, 10);
         param[0]=decodedTelegram.enable_byte;  //enable
         param[1]=(t >> 24) & 0xff;
@@ -3065,7 +3086,7 @@ int set(float line      // the ProgNr of the heater parameter
     case VT_HOUR_MINUTES: //TODO test it
     case VT_HOUR_MINUTES_N:
       {
-      if (val[0]!='\0') {
+      if (val[0]!='\0' && strcmp(val, "---")) {
         uint8_t h=atoi(val);
         uint8_t m=0;
         while (*val!='\0' && *val!=':' && *val!='.') val++;
@@ -3099,7 +3120,7 @@ int set(float line      // the ProgNr of the heater parameter
       {
       uint16_t t=atof(val)*1000.0;
       if (setcmd) {
-        if (val[0]!='\0') {
+        if (val[0]!='\0' && strcmp(val, "---")) {
           param[0]=decodedTelegram.enable_byte;
         } else {
           param[0]=decodedTelegram.enable_byte-1;
@@ -3123,7 +3144,7 @@ int set(float line      // the ProgNr of the heater parameter
       {
       uint32_t t=((int)(atof(val)*decodedTelegram.operand));
       if (setcmd) {
-        if (val[0]!='\0') {
+        if (val[0]!='\0' && strcmp(val, "---")) {
           param[0]=decodedTelegram.enable_byte;
         } else {
           param[0]=decodedTelegram.enable_byte-1;
@@ -3157,7 +3178,7 @@ int set(float line      // the ProgNr of the heater parameter
       int d = 1; int m = 1; int y = 0xFF; int hour = y; int min = y; int sec = y;
       uint8_t date_flag = 0;
       const char *error_msg = NULL;
-      if (val[0]!='\0') {
+      if (val[0]!='\0' && strcmp(val, "---")) {
         switch(decodedTelegram.type){
           case VT_YEAR:
             if (sscanf(val, "%d", &y) != 1) {
@@ -3195,7 +3216,7 @@ int set(float line      // the ProgNr of the heater parameter
             }
           break;
           case VT_DATETIME:
-            if (sscanf(val, "%d.%d.%d_%d:%d:%d", &d, &m, &y, &hour, &min, &sec) != 6) {
+            if (sscanf(val, "%d.%d.%d%*c%d:%d:%d", &d, &m, &y, &hour, &min, &sec) != 6) {
               decodedTelegram.error = 262;
               error_msg = "date/time!";
             } else {
@@ -3241,10 +3262,8 @@ int set(float line      // the ProgNr of the heater parameter
       // Default values if not requested otherwise
       int h1s=0x80,m1s=0x00,h2s=0x80,m2s=0x00,h3s=0x80,m3s=0x00;
       int h1e=0x80,m1e=0x00,h2e=0x80,m2e=0x00,h3e=0x80,m3e=0x00;
-      int ret;
-      ret=sscanf(val,"%d:%d-%d:%d_%d:%d-%d:%d_%d:%d-%d:%d",&h1s,&m1s,&h1e,&m1e,&h2s,&m2s,&h2e,&m2e,&h3s,&m3s,&h3e,&m3e);
       // we need at least the first period
-      if (ret<4) {     // BEGIN hour/minute and END hour/minute
+      if (sscanf(val,"%d:%d-%d:%d%*c%d:%d-%d:%d%*c%d:%d-%d:%d",&h1s,&m1s,&h1e,&m1e,&h2s,&m2s,&h2e,&m2e,&h3s,&m3s,&h3e,&m3e)<4) {     // BEGIN hour/minute and END hour/minute
         return 0;
       }
       param[0]=h1s;     // minimum definition
@@ -3296,8 +3315,6 @@ int set(float line      // the ProgNr of the heater parameter
     }
     // ---------------------------------------------
 /*
-    case VT_HOURS: // (read only)
-    case VT_HOURS_N: // (read only)
     case VT_VOLTAGE: // read only (Ein-/Ausgangstest)
     case VT_LPBADDR: // read only (LPB-System - Aussentemperaturlieferant)
     case VT_PRESSURE_WORD: // read only (Diagnose Verbraucher)
@@ -3547,8 +3564,7 @@ void query_printHTML() {
           }
           listEnumValues(decodedTelegram.enumstr, decodedTelegram.enumstr_len, STR_OPTION_VALUE, "'>", STR_SELECTED, STR_CLOSE_OPTION, NULL, value,
             decodedTelegram.data_type == DT_BITS?(PRINT_VALUE|PRINT_DESCRIPTION|PRINT_VALUE_FIRST|PRINT_ENUM_AS_DT_BITS):
-            (PRINT_VALUE|PRINT_DESCRIPTION|PRINT_VALUE_FIRST),
-            decodedTelegram.type==VT_ENUM?PRINT_DISABLED_VALUE:DO_NOT_PRINT_DISABLED_VALUE);
+            (PRINT_VALUE|PRINT_DESCRIPTION|PRINT_VALUE_FIRST));
           printToWebClient("</select>");
           printToWebClient(fieldDelimiter);
           if (decodedTelegram.readwrite != FL_RONLY) { //not "read only"
@@ -3839,7 +3855,7 @@ void query(float line) {  // line (ProgNr)
 // virtual programs
     if ((line >= (float)BSP_INTERNAL && line < (float)BSP_END)) {
       queryVirtualPrognr(line, i);
-      if (LoggingMode & CF_LOGMODE_MQTT) {
+      if ((LoggingMode & CF_LOGMODE_MQTT) && !(LoggingMode & CF_LOGMODE_MQTT_ONLY_LOG_PARAMS)) {
         LogToMQTT(line);
       }
       return;
@@ -3862,7 +3878,7 @@ void query(float line) {  // line (ProgNr)
             printlnToDebug(build_pvalstr(0));
             SerialOutput->flush();
             LogTelegram(msg);
-            if (LoggingMode & CF_LOGMODE_MQTT) {
+            if ((LoggingMode & CF_LOGMODE_MQTT) && !(LoggingMode & CF_LOGMODE_MQTT_ONLY_LOG_PARAMS)) {
               LogToMQTT(line);
             }
             break;   // success, break out of while loop
@@ -3917,7 +3933,7 @@ void query(float line) {  // line (ProgNr)
 
         printFmtToDebug("#%g: ", line);
         printlnToDebug(build_pvalstr(0));
-        if (LoggingMode & CF_LOGMODE_MQTT) {
+        if ((LoggingMode & CF_LOGMODE_MQTT) && !(LoggingMode & CF_LOGMODE_MQTT_ONLY_LOG_PARAMS)) {
           LogToMQTT(line);
         }
         SerialOutput->flush();
@@ -3976,19 +3992,107 @@ void query(float line_start  // begin at this line (ProgNr)
 }
 
 void GetDevId() {
-  byte  msg[33] = { 0 };
-  byte  tx_msg[33] = { 0 };
-  bus->Send(TYPE_QUR, 0x053D0064, msg, tx_msg);
-  my_dev_fam = msg[10+bus->offset];
-  my_dev_var = msg[12+bus->offset];
-  my_dev_id = (msg[15+bus->offset] << 24) + (msg[16+bus->offset] << 16) + (msg[17+bus->offset] << 8) + (msg[18+bus->offset]);
+  if (bus->getBusType() != BUS_PPS) {
+    if (dev_lookup[0].dev_id == 0xFF) {
+      byte  msg[33] = { 0 };
+      byte  tx_msg[33] = { 0 };
+      uint8_t save_destAddr = bus->getBusDest();
 
-/*
-  if (my_dev_fam == 97 && bus->getBusType() == BUS_LPB) {   // special configuration for LMU7 using OCI420
-    my_dev_fam = 64;
-    my_dev_var = 97;
+      // count number of different device families/variants in category list (if any)
+      const char* enumstr = ENUM_CAT;
+      const uint16_t enumstr_len = sizeof(ENUM_CAT);
+      uint16_t cat_dev = 0;
+      uint16_t c=0;
+      uint16_t dev_array[100] = { 0 };
+      uint8_t arr_counter = 0;
+      uint8_t anz_dev = 0;
+      while (c<enumstr_len) {
+        if (*(enumstr+c+3)==' ') {
+          cat_dev = *(enumstr+c+1);
+          c+=2;
+          bool found = false;
+          for (int i=0;i<sizeof(dev_array);i++) {
+            if (dev_array[i] == 0) break;
+            if (dev_array[i] == cat_dev) found = true; 
+          }
+          if (found == false) {
+            dev_array[arr_counter] = cat_dev;
+            arr_counter++;
+            anz_dev++;
+          }
+        }
+        //skip leading space
+        c+=2;
+        while (*(enumstr+c)!=0) c++;
+        c++;
+      }
+      printFmtToDebug("Found %d devices in category list.\r\n", anz_dev);
+      printlnToDebug("Scanning devices on the bus...");
+
+      switch (bus->getBusType()) {
+        case BUS_BSB: bus->setBusType(BUS_BSB, bus->getBusAddr(), 0x7F); break;
+        case BUS_LPB: bus->setBusType(BUS_LPB, bus->getBusAddr(), 0xFF); break;
+      }
+    
+      if (bus->Send(TYPE_QINF, 0x053D0064, msg, tx_msg, NULL, 0, false) == BUS_OK) {
+        printTelegram(tx_msg, -1);
+        unsigned long startquery = millis();
+        while (millis() - startquery < 10000) {
+          if (bus->GetMessage(msg)) {
+            printTelegram(msg, -1);
+//            uint8_t found_id = 0;
+//            bool found = false;
+            if (decodedTelegram.msg_type != TYPE_INF || decodedTelegram.dest_addr != bus->getBusAddr()) {
+              break;
+            }
+            for (uint i=0;i<sizeof(dev_lookup)/sizeof(dev_lookup[0]);i++) {
+              if (dev_lookup[i].dev_id == decodedTelegram.src_addr) {
+//                found = true;
+                break;
+              }
+              if (dev_lookup[i].dev_id == 0xFF) {
+                dev_lookup[i].dev_id = decodedTelegram.src_addr;
+                dev_lookup[i].dev_fam = msg[10+bus->offset];
+                dev_lookup[i].dev_var = msg[12+bus->offset];
+                dev_lookup[i].dev_serial = (msg[15+bus->offset] << 24) + (msg[16+bus->offset] << 16) + (msg[17+bus->offset] << 8) + (msg[18+bus->offset]);
+                dev_lookup[i].name[0] = '\0';
+                break;
+              }
+            }
+          }
+          delay(1);
+        }
+        for (uint i=0;i<sizeof(dev_lookup)/sizeof(dev_lookup[0]);i++) {
+          if (dev_lookup[i].dev_id == 0xFF) break;
+          bus->setBusType(bus->getBusType(), bus->getBusAddr(), dev_lookup[i].dev_id);
+          if (bus->Send(TYPE_QUR, 0x053D0001, msg, tx_msg, NULL, 0, true) == BUS_OK) {
+            printTelegram(tx_msg, -1);
+            printTelegram(msg, -1);
+            memcpy(dev_lookup[i].name, &msg[bus->getPl_start()], 17);
+          } 
+        }
+        printlnToDebug("Bus devices found:");
+        for (uint i=0;i<sizeof(dev_lookup)/sizeof(dev_lookup[0]);i++) {
+          if (dev_lookup[i].dev_id == 0xFF) {
+            if (i < anz_dev-1) {
+              printFmtToDebug("Only %d out of %d devices have responded, will run device detection again next time.\r\n", i+1, anz_dev);
+              dev_lookup[0].dev_id = 0xFF;
+            }
+            break;
+          }
+          printFmtToDebug("%d/%d/%d/%s\r\n", dev_lookup[i].dev_id, dev_lookup[i].dev_fam, dev_lookup[i].dev_var, dev_lookup[i].name);
+        }
+      }
+      bus->setBusType(bus->getBusType(), bus->getBusAddr(), save_destAddr);
+    }
+    for (uint i=0;i<sizeof(dev_lookup)/sizeof(dev_lookup[0]);i++) {
+      if (dev_lookup[i].dev_id == bus->getBusDest()) {
+        my_dev_fam = dev_lookup[i].dev_fam;
+        my_dev_var = dev_lookup[i].dev_var;
+        my_dev_serial = dev_lookup[i].dev_serial;
+      }
+    }
   }
-*/
   return;
 }
 
@@ -4628,7 +4732,7 @@ void loop() {
             httpflags |= HTTP_GET_ROOT;
             strcpy(p + 1, "index.html");
           }
-            printlnToDebug(p);
+          printlnToDebug(p);
           char *dot = strchr(p, '.');
           char *dot_t = NULL;
           while (dot) {
@@ -4796,7 +4900,7 @@ void loop() {
           boolean create=atoi(p);    // .. to convert
           uint8_t save_my_dev_fam = my_dev_fam;
           uint8_t save_my_dev_var = my_dev_var;
-          uint32_t save_my_dev_id = my_dev_id;
+          uint32_t save_my_dev_serial = my_dev_serial;
           uint8_t destAddr = bus->getBusDest();
           uint8_t tempDestAddr = destAddr;
           if (p[1]=='!') {
@@ -4816,7 +4920,7 @@ void loop() {
             return_to_default_destination(destAddr);
             my_dev_fam = save_my_dev_fam;
             my_dev_var = save_my_dev_var;
-            my_dev_id = save_my_dev_id;
+            my_dev_serial = save_my_dev_serial;
           }
           if (mqtt_success) {
             printToWebClient("\r\n" MENU_TEXT_QFE "\r\n");
@@ -4849,7 +4953,7 @@ void loop() {
           } else {
             uint8_t save_my_dev_fam = my_dev_fam;
             uint8_t save_my_dev_var = my_dev_var;
-            uint32_t save_my_dev_id = my_dev_id;
+            uint32_t save_my_dev_serial = my_dev_serial;
             parameter param = parsingStringToParameter(p);
             line = param.number;
 
@@ -4896,7 +5000,7 @@ void loop() {
                 return_to_default_destination(destAddr);
                 my_dev_fam = save_my_dev_fam;
                 my_dev_var = save_my_dev_var;
-                my_dev_id = save_my_dev_id;
+                my_dev_serial = save_my_dev_serial;
               }
             }
           }
@@ -4908,7 +5012,7 @@ void loop() {
         if (p[1]=='K' && !isdigit(p[2])) {
           uint8_t save_my_dev_fam = my_dev_fam;
           uint8_t save_my_dev_var = my_dev_var;
-          uint32_t save_my_dev_id = my_dev_id;
+          uint32_t save_my_dev_serial = my_dev_serial;
           uint8_t destAddr = bus->getBusDest();
           if (p[2]=='!') {
             set_temp_destination(atoi(&p[3]));
@@ -4937,7 +5041,7 @@ void loop() {
             return_to_default_destination(destAddr);
             my_dev_fam = save_my_dev_fam;
             my_dev_var = save_my_dev_var;
-            my_dev_id = save_my_dev_id;
+            my_dev_serial = save_my_dev_serial;
           }
           break;
         }
@@ -4948,23 +5052,20 @@ void loop() {
           int i=findLine(line);
           if (i>=0) {
             loadPrognrElementsFromTable(line, i);
-            uint8_t flag = 0;
             // check type
             switch (decodedTelegram.type) {
-              case VT_ENUM: flag = PRINT_DISABLED_VALUE + 1; break;
+              case VT_ENUM:
               case VT_WEEKDAY:
               case VT_CUSTOM_ENUM:
               case VT_CUSTOM_BIT:
               case VT_BINARY_ENUM:
-              case VT_BIT: flag = DO_NOT_PRINT_DISABLED_VALUE + 1; break;
+              case VT_BIT:
+                listEnumValues(decodedTelegram.enumstr, decodedTelegram.enumstr_len, NULL, " - ", NULL, "<br>\r\n", NULL, 0, PRINT_VALUE|PRINT_DESCRIPTION|PRINT_VALUE_FIRST);
+                break;
+              default: 
+                printToWebClient(MENU_TEXT_ER6);
+                break;
             }
-            if (flag) {
-              listEnumValues(decodedTelegram.enumstr, decodedTelegram.enumstr_len, NULL, " - ", NULL, "<br>\r\n", NULL, 0, PRINT_VALUE|PRINT_DESCRIPTION|PRINT_VALUE_FIRST, flag - 1);
-            } else {
-              printToWebClient(MENU_TEXT_ER5);
-            }
-          } else {
-            printToWebClient(MENU_TEXT_ER6);
           }
           webPrintFooter();
           break;
@@ -5031,54 +5132,14 @@ void loop() {
           printToWebClient(BSB_VERSION);
           printToWebClient("\r\n");
           printToWebClient(MENU_TEXT_QSC "...\r\n");
-          switch (bus->getBusType()) {
-            case BUS_BSB: bus->setBusType(BUS_BSB, myAddr, 0x7F); break;
-            case BUS_LPB: bus->setBusType(BUS_LPB, myAddr, 0xFF); break;
-          }
-
           flushToWebClient();
 
-          uint8_t found_ids[10] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
-          if (bus->Send(TYPE_QINF, 0x053D0002, msg, tx_msg, NULL, 0, false) == BUS_OK) {
-            printTelegram(tx_msg, -1);
-            unsigned long startquery = millis();
-            while (millis() - startquery < 10000) {
-              if (bus->GetMessage(msg)) {
-                printTelegram(msg, -1);
-                uint8_t found_id = 0;
-                bool found = false;
-                if (bus->getBusType() == BUS_BSB && msg[4] == 0x02) {
-                  found_id = msg[1] & 0x7F;
-                }
-                if (bus->getBusType() == BUS_LPB && msg[8] == 0x02) {
-                  found_id = msg[3];
-                }
-                for (int i=0;i<10;i++) {
-                  if (found_ids[i] == found_id) {
-                    found = true;
-                    break;
-                  }
-                  if (found_ids[i] == 0xFF) {
-                    found_ids[i] = found_id;
-                    break;
-                  }
-                }
-                if (!found) {
-                  printFmtToWebClient(MENU_TEXT_QFD ": %hu\r\n",found_id);
-                  flushToWebClient();
-                }
-              }
-              delay(1);
-            }
-          } else {
-            printToWebClient(MENU_TEXT_QFA "!");
-          }
-          for (int x=0; x<10 && client.connected(); x++) {
-            if (found_ids[x]==0xFF) {
+          for (uint x=0; x<sizeof(dev_lookup)/sizeof(dev_lookup[0]) && client.connected(); x++) {
+            if (dev_lookup[x].dev_id==0xFF) {
               continue;
             }
-            bus->setBusType(bus->getBusType(), myAddr, found_ids[x]);
-            printFmtToWebClient(MENU_TEXT_QRT " %hu...", found_ids[x]);
+            bus->setBusType(bus->getBusType(), myAddr, dev_lookup[x].dev_id);
+            printFmtToWebClient(MENU_TEXT_QRT " %hu...", dev_lookup[x].dev_id);
             flushToWebClient();
 
             uint32_t c=0;
@@ -5268,6 +5329,9 @@ void loop() {
           if (debug_mode) {
             uint8_t destAddr = bus->getBusDest();
             uint8_t tempDestAddr = destAddr;
+            uint8_t save_my_dev_fam = my_dev_fam;
+            uint8_t save_my_dev_var = my_dev_var;
+            uint32_t save_my_dev_serial = my_dev_serial;
             uint8_t type = strtol(&p[2],NULL,16);
             uint32_t c = (uint32_t)strtoul(&p[5],NULL,16);
             uint8_t param[MAX_PARAM_LEN] = { 0 };
@@ -5311,6 +5375,9 @@ void loop() {
             writelnToWebClient();
             if (destAddr != tempDestAddr) {
               return_to_default_destination(destAddr);
+              my_dev_fam = save_my_dev_fam;
+              my_dev_var = save_my_dev_var;
+              my_dev_serial = save_my_dev_serial;
             }
           } else {
             printToWebClient("Activate debug mode in configuration in order to use /Y command!<BR>\r\n");
@@ -5330,12 +5397,12 @@ void loop() {
           bool d_flag = false;
           bool output = false;
           bool been_here = false;
-          uint8_t destAddr = bus->getBusDest();
-          uint8_t tempDestAddr = 0;
-          uint8_t tempDestAddrOnPrevIteration = 0;
+          int16_t destAddr = bus->getBusDest();
+          int16_t tempDestAddr = 0;
+          int16_t tempDestAddrOnPrevIteration = 0;
           uint8_t save_my_dev_fam = my_dev_fam;
           uint8_t save_my_dev_var = my_dev_var;
-          uint32_t save_my_dev_id = my_dev_id;
+          uint32_t save_my_dev_serial = my_dev_serial;
           uint8_t opening_brackets = 0;
           char* json_token = strtok(p, "=,"); // drop everything before "="
           json_token = strtok(NULL, ",");
@@ -5367,6 +5434,8 @@ void loop() {
             forcedflushToWebClient();
             break;
           }
+
+// JSON URL-commands that do not require a POST body
 
           if (p[2] == 'V'){ // JSON API version
             printFmtToWebClient("\"api_version\": \"" JSON_MAJOR "." JSON_MINOR "\"\r\n}");
@@ -5411,6 +5480,21 @@ void loop() {
             }
             printFmtToWebClient(",\r\n  \"bus\": \"%s\",\r\n  \"buswritable\": %d,\r\n", json_value_string, json_parameter);
             printFmtToWebClient("  \"busaddr\": %d,\r\n  \"busdest\": %d,\r\n", bus->getBusAddr(), bus->getBusDest());
+            printToWebClient("  \"busdevices\": [\r\n");
+            not_first = false;
+            int numDevices = sizeof(dev_lookup) / sizeof(dev_lookup[0]);
+            for (i=0;i<numDevices;i++) {
+              if (dev_lookup[i].dev_id < 0xFF) {
+                if (not_first) {
+                  printToWebClient(",\r\n");
+                } else {
+                  not_first = true;
+                }
+                printFmtToWebClient("    { \"dev_id\": %d,  \"dev_fam\": %d, \"dev_var\": %d, \"dev_serial\": %d, \"dev_name\": \"%s\" }", dev_lookup[i].dev_id, dev_lookup[i].dev_fam, dev_lookup[i].dev_var, dev_lookup[i].dev_serial, dev_lookup[i].name);
+              }
+            }
+            printToWebClient("\r\n  ],\r\n");
+
 //enabled options
             printFmtToWebClient("  \"monitor\": %d,\r\n  \"verbose\": %d", monitor, verbose);
 
@@ -5432,21 +5516,20 @@ void loop() {
             printToWebClient("\r\n  ]");
 
 //averages
-            if (LoggingMode & CF_LOGMODE_24AVG) {
-              printToWebClient(",\r\n  \"averages\": [\r\n");
-              not_first = false;
-              for (i = 0; i < numAverages; i++) {
-                if (avg_parameters[i].number > 0) {
-                  if (not_first) {
-                    printToWebClient(",\r\n");
-                  } else {
-                    not_first = true;
-                  }
-                  printParameterInJSON_ToWebClient(avg_parameters[i]);
+            printToWebClient(",\r\n  \"averages\": [\r\n");
+            not_first = false;
+            for (i = 0; i < numAverages; i++) {
+              if (avg_parameters[i].number > 0) {
+                if (not_first) {
+                  printToWebClient(",\r\n");
+                } else {
+                  not_first = true;
                 }
+                printParameterInJSON_ToWebClient(avg_parameters[i]);
               }
-              printToWebClient("\r\n  ]");
             }
+            printToWebClient("\r\n  ]");
+
 // logged parameters
             printFmtToWebClient(",\r\n  \"loggingmode\": %d,\r\n  \"loginterval\": %d,\r\n  \"logged\": [\r\n", LoggingMode, log_interval);
             not_first = false;
@@ -5472,8 +5555,20 @@ void loop() {
             break;
           }
           if (p[2] == 'B'){ // backup settings to file
+            uint8_t save_my_dev_fam = my_dev_fam;
+            uint8_t save_my_dev_var = my_dev_var;
+            uint32_t save_my_dev_serial = my_dev_serial;
+            int16_t destAddr = bus->getBusDest();
+            int16_t tempDestAddr = destAddr;
+            if (p[3]=='!') {
+              set_temp_destination(atoi(&p[4]));
+              tempDestAddr = bus->getBusDest();
+            }
+
             bool notfirst = false;
             for (uint cat = 1; cat < CAT_UNKNOWN; cat++) { //Ignore date/time category
+
+              printKat(cat,1);
               if ((bus->getBusType() != BUS_PPS && decodedTelegram.error != 258 && decodedTelegram.error != 263) || (bus->getBusType() == BUS_PPS && (cat == CAT_PPS || cat == CAT_USERSENSORS))) {
 
                 cat_min = ENUM_CAT_NR[cat * 2];
@@ -5498,7 +5593,7 @@ void loop() {
                     query(j);
                     if (decodedTelegram.error == 0) {//Do not save parameters with errors
                       if (notfirst) {printToWebClient(",\r\n");} else {notfirst = true;}
-                      printFmtToWebClient("  \"%g\":{\"parameter\":\"%g\", \"value\":\"%s\", \"type\":\"%d\"}", j, j, decodedTelegram.value, 1);
+                      printFmtToWebClient("  \"%g - %s - %s\":{\"parameter\":\"%g\", \"value\":\"%s\", \"type\":\"%d\", \"destination\":%d}", j, decodedTelegram.catdescaddr, decodedTelegram.prognrdescaddr, j, decodedTelegram.value, 1, tempDestAddr);
                     }
                   }
 next_parameter:
@@ -5506,17 +5601,26 @@ next_parameter:
                 }while(j >= cat_min && j <= cat_max);
               }
             }
+
+            if (tempDestAddr != destAddr) {
+              return_to_default_destination(destAddr);
+              my_dev_fam = save_my_dev_fam;
+              my_dev_var = save_my_dev_var;
+              my_dev_serial = save_my_dev_serial;
+            }
+
             printToWebClient("\r\n}\r\n");
             forcedflushToWebClient();
             break;
           }
 
-// really we need flushing before prognr parsing?
-/*          if (json_token!=NULL) {
-            client.flush();
-          }*/
-          while (client.available()) {
-            if (client.read()=='{') {
+// JSON commands that parse the POST body
+          char c = ' ';
+          char old_c = ' ';
+
+          while (client.available()) {  // drop everything until the first opening bracket
+            c = client.read();
+            if (c == '{' || c == '[') {
               opening_brackets++;
               break;
             }
@@ -5529,21 +5633,22 @@ next_parameter:
               bool opening_quotation = false;
               tempDestAddr = destAddr;
               while (client.available()) {
-                char c = client.read();
-                if (c == '{') {
+                old_c = c;
+                c = client.read();
+                if (c == '{' || c == '[') {
                   opening_brackets++;
                   if (opening_brackets > 2) {//JSON too complex. Broken JSON?
                     opening_brackets = 0;
                     break;
                   }
                 }
-                if (c == '}') { output = true; opening_brackets--;}
+                if (c == '}' || c == ']') { output = true; opening_brackets--;}
                 if (c == '\"') {opening_quotation = opening_quotation?false:true;} //XOR (switch from false to true and vice versa)
-                if (opening_quotation) {
-                  if ((c == 'P' || c == 'p') && t_flag != true) { p_flag = true; } //Parameter
-                  if (c == 'V' || c == 'v') { v_flag = true; } //Value
-                  if (c == 'T' || c == 't') { t_flag = true; } //Type
-                  if ((c == 'D' || c == 'd') && t_flag != true) { d_flag = true; } //Destination
+                if (opening_quotation && old_c == '\"') {       // JSON key needs to be directly preceded by a quotation mark (such as "Parameter", not " Parameter")
+                  if (c == 'P' || c == 'p') { p_flag = true; }  //Parameter
+                  if (c == 'V' || c == 'v') { v_flag = true; }  //Value
+                  if (c == 'T' || c == 't') { t_flag = true; }  //Type
+                  if (c == 'D' || c == 'd') { d_flag = true; }  //Destination
                   if ( p_flag || v_flag || t_flag || d_flag) {
                     uint8_t stage_f = 0; //field name
                     bool stage_v = 0; //field value
@@ -5577,10 +5682,10 @@ next_parameter:
                     }
                     while (client.available() && j_char_idx < jsize - 1) {
                       c = client.read();
-                      if (!stage_v && (c == ' ' || c == ',' || c == '}' || c == '\n' || c == '\r')) { //if it not a string value then we try to find end markers and drop spaces
+                      if (!stage_v && (c == ' ' || c == ',' || c == '}' || c == ']' || c == '\n' || c == '\r')) { //if it not a string value then we try to find end markers and drop spaces
                         if (c == ' ') continue;
-                        if (c == '}') { output = true; opening_brackets--;}
-                      break;
+                        if (c == '}' || c == ']') { output = true; opening_brackets--;}
+                        break;
                       }
                       if (c == '\"') { //It is string value?
                         if (!stage_v) { //start read from next char after quotation mark if it found
@@ -5643,13 +5748,24 @@ next_parameter:
               if (p[2]=='K' && !isdigit(p[4])) {
                 bool notfirst = false;
                 for (uint cat=0;cat<CAT_UNKNOWN;cat++) {
-                  printKat(cat,1);
+                  uint32_t cat_dev_fam_var = printKat(cat,1);
+                  uint16_t cat_dev_fam = cat_dev_fam_var >> 8;
+                  uint16_t cat_dev_var = cat_dev_fam_var & 0xFF;
                   writelnToDebug();
-                  if ((bus->getBusType() != BUS_PPS && decodedTelegram.error != 258 && decodedTelegram.error != 263) || (bus->getBusType() == BUS_PPS && (cat == CAT_PPS || cat == CAT_USERSENSORS))) {
+                  if ((bus->getBusType() != BUS_PPS && decodedTelegram.error != 258) || (bus->getBusType() == BUS_PPS && (cat == CAT_PPS || cat == CAT_USERSENSORS))) {
                     if (notfirst) {printToWebClient(",\r\n");} else {notfirst = true;}
                     printFmtToWebClient("\"%d\": { \"name\": \"", cat);
                     cat_min = ENUM_CAT_NR[cat*2];
                     cat_max = ENUM_CAT_NR[cat*2+1];
+                    uint8_t cat_dev_id = 0;
+                    char* cat_dev_name = NULL;
+                    for (uint x=0; x < sizeof(dev_lookup)/sizeof(dev_lookup[0]); x++) {
+                      if (dev_lookup[x].dev_fam == cat_dev_fam && dev_lookup[x].dev_var == cat_dev_var) {
+                        cat_dev_id = dev_lookup[x].dev_id;
+                        cat_dev_name = dev_lookup[x].name;
+                        break;
+                      } 
+                    }
 /*
                     if (cat*2+2 < sizeof(ENUM_CAT_NR)/sizeof(*ENUM_CAT_NR)) { // only perform category boundary check if there is a higher category present
                       if (cat_max > ENUM_CAT_NR[cat*2+2]) {
@@ -5658,7 +5774,7 @@ next_parameter:
                     }
 */
                     printToWebClient(decodedTelegram.enumdescaddr); //copy Category name to buffer
-                    printFmtToWebClient("\", \"min\": %g, \"max\": %g }", cat_min, cat_max);
+                    printFmtToWebClient("\", \"min\": %g, \"max\": %g, \"dev_fam\": %d, \"dev_var\": %d, \"dev_id\": %d, \"dev_name\": \"%s\" }", cat_min, cat_max, cat_dev_fam, cat_dev_var, cat_dev_id, cat_dev_name);
                   }
                 }
                 json_token = NULL;
@@ -5713,7 +5829,7 @@ next_parameter:
                 printToWebClient(decodedTelegram.progtypedescaddr);
                 printToWebClient("\",\r\n    \"dataType_family\": \"");
                 printToWebClient(decodedTelegram.data_type_descaddr);
-                printFmtToWebClient("\",\r\n    \"destination\": \"%d\",\r\n", tempDestAddr);
+                printFmtToWebClient("\",\r\n    \"destination\": %d,\r\n", tempDestAddr);
 
                 if (p[2]=='Q') {
                   printFmtToWebClient("    \"error\": %d,\r\n    \"value\": \"%s\",\r\n    \"desc\": \"", decodedTelegram.error, decodedTelegram.value);
@@ -5725,7 +5841,7 @@ next_parameter:
                 if (p[2] != 'Q') {
                   printToWebClient("    \"possibleValues\": [\r\n");
                     if (decodedTelegram.enumstr_len > 0) {
-                      listEnumValues(decodedTelegram.enumstr, decodedTelegram.enumstr_len, "      { \"enumValue\": ", ", \"desc\": \"", NULL, "\" }", ",\r\n", 0, PRINT_VALUE|PRINT_DESCRIPTION|PRINT_VALUE_FIRST, decodedTelegram.type==VT_ENUM?PRINT_DISABLED_VALUE:DO_NOT_PRINT_DISABLED_VALUE);
+                      listEnumValues(decodedTelegram.enumstr, decodedTelegram.enumstr_len, "      { \"enumValue\": ", ", \"desc\": \"", NULL, "\" }", ",\r\n", 0, PRINT_VALUE|PRINT_DESCRIPTION|PRINT_VALUE_FIRST);
                     }
 
                   printFmtToWebClient("\r\n    ],\r\n    \"isswitch\": %d,\r\n", decodedTelegram.isswitch);
@@ -5742,12 +5858,16 @@ next_parameter:
                   strcat(pre_buf, "1");
                   printFmtToWebClient("    \"precision\": %s,\r\n", pre_buf);
                 }
-                printFmtToWebClient("    \"dataType\": %d,\r\n    \"readonly\": %d,\r\n    \"readwrite\": %d,\r\n    \"unit\": \"%s\"\r\n  }", decodedTelegram.data_type, decodedTelegram.readwrite == FL_RONLY?1:0, decodedTelegram.readwrite, decodedTelegram.unit);
+                printFmtToWebClient("    \"dataType\": %d,\r\n    \"readwrite\": %d,\r\n    \"unit\": \"%s\"\r\n  }", decodedTelegram.data_type, decodedTelegram.readwrite, decodedTelegram.unit);
               }
 
               if (p[2]=='S') {
                 if (!been_here) been_here = true; else printToWebClient(",\r\n");
                 int status = set(json_parameter, json_value_string, json_type);
+                strcpy(decodedTelegram.value, json_value_string);
+                if ((LoggingMode & CF_LOGMODE_MQTT) && !(LoggingMode & CF_LOGMODE_MQTT_ONLY_LOG_PARAMS)) {   // If not only log parameters are sent to MQTT broker, we need to send it here due to lack of a query() call.
+                  LogToMQTT(json_parameter);
+                }
                 printFmtToWebClient("  \"%g\": {\r\n    \"status\": %d\r\n  }", json_parameter, status);
 
                 printFmtToDebug("Setting parameter %g to \"%s\" with type %d to destination %d\r\n", json_parameter, json_value_string, json_type, tempDestAddr);
@@ -5756,7 +5876,7 @@ next_parameter:
               if (p[2]=='R') {
                 if (!been_here) been_here = true; else printToWebClient(",\r\n");
                 queryDefaultValue(json_parameter, msg, tx_msg);
-                printFmtToWebClient("  \"%g\": {\r\n    \"error\": %d,\r\n    \"value\": \"%s\"\r\n  }", json_parameter, decodedTelegram.error, decodedTelegram.value);
+                printFmtToWebClient("  \"%g\": {\r\n    \"error\": %d,\r\n    \"value\": \"%s\",\r\n    \"destination\": %d\r\n  }", json_parameter, decodedTelegram.error, decodedTelegram.value, tempDestAddr);
 
                 printFmtToDebug("Default value of parameter %g for destination %d is \"%s\"\r\n", json_parameter, tempDestAddr, decodedTelegram.value);
               }
@@ -5780,7 +5900,7 @@ next_parameter:
             return_to_default_destination(destAddr);
             my_dev_fam = save_my_dev_fam;
             my_dev_var = save_my_dev_var;
-            my_dev_id = save_my_dev_id;
+            my_dev_serial = save_my_dev_serial;
           }
           bool needReboot = false;
           if (p[2]=='W') {
@@ -6304,7 +6424,7 @@ next_parameter:
             float end=-1;
             uint8_t save_my_dev_fam = my_dev_fam;
             uint8_t save_my_dev_var = my_dev_var;
-            uint32_t save_my_dev_id = my_dev_id;
+            uint32_t save_my_dev_serial = my_dev_serial;
             uint8_t destAddr = bus->getBusDest();
             if (range[0]=='K') {
               //Here will be parsing category number not parameter
@@ -6360,7 +6480,7 @@ next_parameter:
               return_to_default_destination(destAddr);
               my_dev_fam = save_my_dev_fam;
               my_dev_var = save_my_dev_var;
-              my_dev_id = save_my_dev_id;
+              my_dev_serial = save_my_dev_serial;
             }
           }
           range = strtok(NULL,"/");
@@ -6408,7 +6528,7 @@ next_parameter:
         uint8_t d_addr = destAddr;
         uint8_t save_my_dev_fam = my_dev_fam;
         uint8_t save_my_dev_var = my_dev_var;
-        uint32_t save_my_dev_id = my_dev_id;
+        uint32_t save_my_dev_serial = my_dev_serial;
         for (int i=0; i < numLogValues; i++) {
           if (log_parameters[i].number > 0) {
             if (log_parameters[i].dest_addr > -1){
@@ -6422,19 +6542,21 @@ next_parameter:
                 return_to_default_destination(destAddr);
                 my_dev_fam = save_my_dev_fam;
                 my_dev_var = save_my_dev_var;
-                my_dev_id = save_my_dev_id;
+                my_dev_serial = save_my_dev_serial;
               }
             }
             parameter param = log_parameters[i];
             query(param.number);
-//            mqtt_sendtoBroker(log_parameters[i]);  //Luposoft, put whole unchanged code in new function mqtt_sendtoBroker to use it at other points as well
+            if ((LoggingMode & CF_LOGMODE_MQTT) && (LoggingMode & CF_LOGMODE_MQTT_ONLY_LOG_PARAMS)) {   // If only log parameters are sent to MQTT broker, we need an exemption here. Otherwise, query() will publish the parameter anyway.
+              mqtt_sendtoBroker(log_parameters[i]);  //Luposoft, put whole unchanged code in new function mqtt_sendtoBroker to use it at other points as well
+            }
           }
         }
         if (destAddr != d_addr) {
           return_to_default_destination(destAddr);
           my_dev_fam = save_my_dev_fam;
           my_dev_var = save_my_dev_var;
-          my_dev_id = save_my_dev_id;
+          my_dev_serial = save_my_dev_serial;
 
         }
         if (MQTTPubSubClient != NULL && !(LoggingMode & CF_LOGMODE_MQTT)) { //Luposoft: user may disable MQTT through web interface
@@ -6484,7 +6606,7 @@ next_parameter:
       uint8_t d_addr = destAddr;
       uint8_t save_my_dev_fam = my_dev_fam;
       uint8_t save_my_dev_var = my_dev_var;
-      uint32_t save_my_dev_id = my_dev_id;
+      uint32_t save_my_dev_serial = my_dev_serial;
       for (int i = 0; i < numLogValues; i++) {
         int outBufLen = 0;
         if (log_parameters[i].number > 0) {
@@ -6499,7 +6621,7 @@ next_parameter:
               return_to_default_destination(destAddr);
               my_dev_fam = save_my_dev_fam;
               my_dev_var = save_my_dev_var;
-              my_dev_id = save_my_dev_id;
+              my_dev_serial = save_my_dev_serial;
             }
           }
           query(log_parameters[i].number);
@@ -6547,7 +6669,7 @@ next_parameter:
         return_to_default_destination(destAddr);
         my_dev_fam = save_my_dev_fam;
         my_dev_var = save_my_dev_var;
-        my_dev_id = save_my_dev_id;
+        my_dev_serial = save_my_dev_serial;
       }
     }
   }
@@ -6567,7 +6689,7 @@ next_parameter:
       uint8_t d_addr = destAddr;
       uint8_t save_my_dev_fam = my_dev_fam;
       uint8_t save_my_dev_var = my_dev_var;
-      uint32_t save_my_dev_id = my_dev_id;
+      uint32_t save_my_dev_serial = my_dev_serial;
       for (int i = 0; i < numAverages; i++) {
         if (avg_parameters[i].number > 0) {
           if (avg_parameters[i].dest_addr > -1){
@@ -6582,7 +6704,7 @@ next_parameter:
               return_to_default_destination(destAddr);
               my_dev_fam = save_my_dev_fam;
               my_dev_var = save_my_dev_var;
-              my_dev_id = save_my_dev_id;
+              my_dev_serial = save_my_dev_serial;
             }
           }
           query(avg_parameters[i].number);
@@ -6603,7 +6725,7 @@ next_parameter:
         return_to_default_destination(destAddr);
         my_dev_fam = save_my_dev_fam;
         my_dev_var = save_my_dev_var;
-        my_dev_id = save_my_dev_id;
+        my_dev_serial = save_my_dev_serial;
       }
 
       avgCounter++;
@@ -6837,6 +6959,11 @@ next_parameter:
     }
 #endif
   }
+  if (bus->getBusDest() != dest_address) { // just in case temporary reset doesn't (always) work, reset detination ID back to default.
+    printFmtToDebug("Current destination ID %d does not match default destination ID %d, fixing...\r\n", bus->getBusDest(), dest_address);
+    bus->setBusType(bus->getBusType(), own_address, dest_address);
+    GetDevId();
+  }
 #if defined(ESP32)
   esp_task_wdt_reset();
 #endif
@@ -7068,6 +7195,14 @@ void removeTemporaryAP() {
  *  Ethernet instance
  * *************************************************************** */
 void setup() {
+
+for (uint i=0; i<sizeof(dev_lookup)/sizeof(dev_lookup[0]); i++) {
+  dev_lookup[i].dev_fam = 0xFF;
+  dev_lookup[i].dev_var = 0xFF;
+  dev_lookup[i].dev_id = 0xFF;
+  dev_lookup[i].name[0] = '\0';
+}
+
 #ifdef BtSerial
   SerialOutput = &Serial2;
   Serial2.begin(115200, SERIAL_8N1); // hardware serial interface #2

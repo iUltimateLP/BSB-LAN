@@ -85,16 +85,20 @@ table th:nth-of-type(2) {
 
 ### JSON interface
 
+**For a complete structure of the JSON API, please see [here for the OpenAPI documentation](https://editor.swagger.io/?url=https://raw.githubusercontent.com/fredlcore/bsb_lan/master/openapi.yaml).**
+
 |URL command|Functionality|
 |:----------|:------------|
 |`/JQ=<x>,<y>,<z>`|Query parameters `<x>`, `<y>` and `<z>` and return a JSON structure|
 |`/JQ`      |Query parameters based on a received JSON structure via HTTP POST|  
-|`/JK=<x>`  |Query all parameters of category `<x>`|
-|`/JS`      |Set parameters based on a received JSON structure via HTTP
+|`/JS`      |Set parameters based on a received JSON structure via HTTP POST|
 |`/JR<x>`   |Query default value of parameter `<x>` and return a JSON structure|
-|`/JK=ALL`  |Dump ranges for all available categories as JSON structure|
-|`/JC=<x>,<y>,<z>`|Dump possible values for parameters `<x>`, `<y>` and `<z>` for option-type parameters. Same JSON structure as `/JK=<x>`.|
-|`/JB`      |Backup of all writeable parameters in a JSON structure that can be used to write back using `/JS`|
+|`/JK=ALL`  |Dump parameter ranges for all available categories as JSON structure|
+|`/JK=<x>`  |Dump the parameter structure for all parameters of category `<x>`|
+|`/JC=<x>,<y>,<z>`|Dump the parameter structure for parameters `<x>`, `<y>` and `<z>`. Same JSON structure as `/JK=<x>`.|
+|`/JC       |Dump the parameter structure for a parameter list received as a JSON structure via HTTP POST.|
+|`/JB`      |Backup of all writeable parameters received as a JSON structure that can be used to restore using `/JS`.|
+|`/JB!<addr>`|Backup of all writeable parameters from controller at destination address `<addr>` in a JSON structure that can be used to write back using `/JS`. |
 |`/JL`      |Creates a JSON structure of BSB-LAN's configuration settings`|
 |`/JW`      |Writes configuration settings based on a JSON structure created by `/JL`|   
 |`/JI`      |Dump runtime information of BSB-LAN as JSON structure`|
@@ -115,9 +119,12 @@ table th:nth-of-type(2) {
 <img src="../images/Web-Interface2.png">
 If logged data on storage (either SD card or internal flash) is available, the **Display log file** becomes clickable. By default, it will display the logged data in the browser.  
 To access the logged data itself (in the file `datalog.txt`), use the `/D` URL command mentioned above.  
-By default, "Display log file" displays the log data of the most recent `n` calendar days (`n=DEFAULT_DAYS_TO_PLOT`, configurable in `BSB_LAN_config.h`). Subsequently, controls on the web page can be used to select a different range, depending on the data contained in the log file  
-Mouseover, click and mouse wheel actions within the graphical display provide various control options:
+By default, "Display log file" displays the log data of the most recent `n` calendar days (`n=DEFAULT_DAYS_TO_PLOT`, configurable in `BSB_LAN_config.h`). Subsequently, controls on the web page can be used to select a different range, depending on the data contained in the log file.  
+Mouseover, click and mouse wheel actions within the graphical display provide various control options:  
+
 - Better legibility for value numbers with plot lines close to each other (mouseover on plot)
 - Users can interactively highlight plot lines for improved overview (mouseover on legend entries)
 - Users can interactively disable plot lines for improved overview and vertical scaling (click on legend entries)
 - Zoom (mousewheel/pinch on plot) and pan capability (drag zoomed-in plot)
+
+For further processing, you can use this [Python script](https://github.com/DE-cr/BSB-LAN/tree/BSB-LAN_evaluate_datalogs/BSB_LAN/scripts/BSB-LAN_evaluate_datalogs) that takes BSB-LAN's log output to create pivoted CSV files that can be used for more insightful diagrams.

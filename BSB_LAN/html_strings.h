@@ -431,8 +431,8 @@ const char header_html[] =
 const char header_html2[] =
   "<script>function set(p,d){" NEWLINE
     "var v=document.getElementById('value'+p+'-'+d).value.replace(/\\.$/,'')" NEWLINE
-          ".replaceAll(' ','_')" NEWLINE
-          ".replace('---','');" NEWLINE
+          ".replaceAll(' ','_');" NEWLINE
+//          ".replace('---','');" NEWLINE
     "window.open(document.getElementById('main_link').href+'S'+p+'!'+d+'='+v,'_self')" NEWLINE
   "}" NEWLINE
   "function setbit(p){" NEWLINE

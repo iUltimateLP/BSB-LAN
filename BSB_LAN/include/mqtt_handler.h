@@ -53,7 +53,6 @@ void mqtt_sendtoBroker(parameter param) {
   initStringBuffer(&sb_payload, MQTTPayload, sizeof(MQTTPayload));
   initStringBuffer(&sb_topic, MQTTTopic, sizeof(MQTTTopic));
   appendStringBuffer(&sb_topic, "%s/%d/%d/%g/status", MQTTTopicPrefix, (param.dest_addr==-1?bus->getBusDest():param.dest_addr), decodedTelegram.cat, param.number);
-
   switch(mqtt_mode)
   {
     // =============================================
@@ -182,21 +181,12 @@ char* mqtt_get_will_topic() {
  * *************************************************************** */
 
 bool mqtt_connect() {
-  char* tempstr = (char*)malloc(sizeof(mqtt_broker_addr));  // make a copy of mqtt_broker_addr for destructive strtok operation
-  strcpy(tempstr, mqtt_broker_addr);
-  uint16_t mqtt_port = 1883; 
-  char* mqtt_host = strtok(tempstr,":");  // hostname is before an optional colon that separates the port
-  char* token = strtok(NULL, ":");   // remaining part is the port number
-  if (token != 0) {
-    mqtt_port = atoi(token);
-  }
-  free(tempstr);
-
   bool first_connect = false;
   if(MQTTPubSubClient == NULL) {
-    mqtt_client= new ComClient();
+    mqtt_client = new ComClient();
     MQTTPubSubClient = new PubSubClient(mqtt_client[0]);
-    MQTTPubSubClient->setBufferSize(2048);
+    MQTTPubSubClient->setBufferSize(2048, 2048);
+    MQTTPubSubClient->setKeepAlive(120); // raise to higher value so broker does not disconnect on latency
     mqtt_reconnect_timer = 0;
     first_connect = true;
   }
@@ -204,13 +194,23 @@ bool mqtt_connect() {
     if (!first_connect && !mqtt_reconnect_timer) {
       // We just lost connection, don't try to reconnect immediately
       mqtt_reconnect_timer = millis();
-      printlnToDebug("MQTT connection lost");
+      printFmtToDebug("MQTT connection lost with status code %d\r\n", MQTTPubSubClient->state());
       return false;
     }
     if (mqtt_reconnect_timer && millis() - mqtt_reconnect_timer < 10000) {
       // Wait 1s between reconnection attempts
       return false;
     }
+
+    char* tempstr = (char*)malloc(sizeof(mqtt_broker_addr));  // make a copy of mqtt_broker_addr for destructive strtok operation
+    strcpy(tempstr, mqtt_broker_addr);
+    uint16_t mqtt_port = 1883; 
+    char* mqtt_host = strtok(tempstr,":");  // hostname is before an optional colon that separates the port
+    char* token = strtok(NULL, ":");   // remaining part is the port number
+    if (token != 0) {
+      mqtt_port = atoi(token);
+    }
+    free(tempstr);
 
     char* MQTTUser = NULL;
     if(MQTTUsername[0]) {
@@ -226,7 +226,7 @@ bool mqtt_connect() {
     printFmtToDebug("Will topic: %s\r\n", mqtt_get_will_topic());
     MQTTPubSubClient->connect(mqtt_get_client_id(), MQTTUser, MQTTPass, mqtt_get_will_topic(), 1, true, "offline");
     if (!MQTTPubSubClient->connected()) {
-      printlnToDebug("Failed to connect to MQTT broker, retrying...");
+      printFmtToDebug("Failed to connect to MQTT broker with status code %d, retrying...\r\n", MQTTPubSubClient->state());
       mqtt_reconnect_timer = millis();
     } else {
       printlnToDebug("Connected to MQTT broker, updating will topic");
@@ -236,7 +236,6 @@ bool mqtt_connect() {
       strcat(tempTopic, "/#");
       MQTTPubSubClient->subscribe(tempTopic, 1);   //Luposoft: set the topic listen to
       printFmtToDebug("Subscribed to topic '%s'\r\n", tempTopic);
-      MQTTPubSubClient->setKeepAlive(120);       //Luposoft: just for savety
       MQTTPubSubClient->setCallback(mqtt_callback);  //Luposoft: set to function is called when incoming message
       MQTTPubSubClient->publish(mqtt_get_will_topic(), "online", true);
       printFmtToDebug("Published status 'online' to topic '%s'\r\n", mqtt_get_will_topic());
@@ -300,7 +299,7 @@ void mqtt_callback(char* topic, byte* passed_payload, unsigned int length) {
   uint8_t destAddr = bus->getBusDest();
   uint8_t save_my_dev_fam = my_dev_fam;
   uint8_t save_my_dev_var = my_dev_var;
-  uint32_t save_my_dev_id = my_dev_id;
+  uint32_t save_my_dev_serial = my_dev_serial;
   uint8_t setmode = 0;  // 0 = send INF, 1 = send SET, 2 = query
   int topic_len = strlen(MQTTTopicPrefix);
   parameter param;
@@ -350,12 +349,15 @@ void mqtt_callback(char* topic, byte* passed_payload, unsigned int length) {
         }
         printFmtToDebug("%g!%d \r\n", param.number, param.dest_addr);
         query(param.number);
-      
+        if ((LoggingMode & CF_LOGMODE_MQTT) && (LoggingMode & CF_LOGMODE_MQTT_ONLY_LOG_PARAMS)) {   // If only log parameters are sent to MQTT broker, we need an exemption here if /poll is used via MQTT. Otherwise, query() will publish the parameter anyway.
+          mqtt_sendtoBroker(param);
+        }
+
         if (param.dest_addr > -1 && destAddr != param.dest_addr) {
           bus->setBusType(bus->getBusType(), bus->getBusAddr(), destAddr);
           my_dev_fam = save_my_dev_fam;
           my_dev_var = save_my_dev_var;
-          my_dev_id = save_my_dev_id;
+          my_dev_serial = save_my_dev_serial;
         }
         token = strtok(NULL, ",");   // next parameter
       }
@@ -376,8 +378,14 @@ void mqtt_callback(char* topic, byte* passed_payload, unsigned int length) {
       default: {setmode = 2;break;}
     }
     param = parsingStringToParameter(payload);
-    payload=strchr(payload,'=');
-    payload++;
+    if (setmode < 2) {
+      payload=strchr(payload,'=');
+      if (payload == NULL) {
+        printFmtToDebug("MQTT message does not contain '=', discarding...\r\n");
+        return;
+      }
+      payload++;
+    }
   } else {
     printFmtToDebug("MQTT message not recognized: %s - %s\r\n", topic, payload);
     return;
@@ -396,12 +404,15 @@ void mqtt_callback(char* topic, byte* passed_payload, unsigned int length) {
     set(param.number,payload,setmode);  //command to heater
   }
   query(param.number);
+  if ((LoggingMode & CF_LOGMODE_MQTT) && (LoggingMode & CF_LOGMODE_MQTT_ONLY_LOG_PARAMS)) {   // If only log parameters are sent to MQTT broker, we need an exemption here if /poll is used via MQTT. Otherwise, query() will publish the parameter anyway.
+    mqtt_sendtoBroker(param);
+  }
 
   if (param.dest_addr > -1 && destAddr != param.dest_addr) {
     bus->setBusType(bus->getBusType(), bus->getBusAddr(), destAddr);
     my_dev_fam = save_my_dev_fam;
     my_dev_var = save_my_dev_var;
-    my_dev_id = save_my_dev_id;
+    my_dev_serial = save_my_dev_serial;
   }
 
 }
@@ -435,7 +446,7 @@ boolean mqtt_send_discovery(boolean create=true) {
         loadPrognrElementsFromTable(line, i);
         loadCategoryDescAddr();
         appendStringBuffer(&sb_topic, "homeassistant/");
-        appendStringBuffer(&sb_payload, "{\"~\":\"%s/%d/%d/%g\",\"unique_id\":\"%g-%d-%d-%d\",\"state_topic\":\"~/status\",", MQTTTopicPrefix, bus->getBusDest(), decodedTelegram.cat, line, line, cmdtbl[i].dev_fam, cmdtbl[i].dev_var, my_dev_id);
+        appendStringBuffer(&sb_payload, "{\"~\":\"%s/%d/%d/%g\",\"unique_id\":\"%g-%d-%d-%d\",\"state_topic\":\"~/status\",", MQTTTopicPrefix, bus->getBusDest(), decodedTelegram.cat, line, line, cmdtbl[i].dev_fam, cmdtbl[i].dev_var, my_dev_serial);
         if (decodedTelegram.isswitch) {
           appendStringBuffer(&sb_payload, "\"icon\":\"mdi:toggle-switch\",");
         } else if (!strcmp(decodedTelegram.unit, U_DEG) || !strcmp(decodedTelegram.unit, U_TEMP_PER_MIN) || !strcmp(decodedTelegram.unit, U_CEL_MIN)) {
@@ -510,7 +521,7 @@ boolean mqtt_send_discovery(boolean create=true) {
         }
         appendStringBuffer(&sb_payload, "\",\"device\":{\"name\":\"%s\",\"identifiers\":\"%s-%02X%02X%02X%02X%02X%02X\",\"manufacturer\":\"bsb-lan.de\",\"model\":\"" MAJOR "." MINOR "." PATCH "\"}}", MQTTTopicPrefix, MQTTTopicPrefix, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
   
-        appendStringBuffer(&sb_topic, "BSB-LAN/%g-%d-%d-%d/config", line, cmdtbl[i].dev_fam, cmdtbl[i].dev_var, my_dev_id);
+        appendStringBuffer(&sb_topic, "BSB-LAN/%g-%d-%d-%d/config", line, cmdtbl[i].dev_fam, cmdtbl[i].dev_var, my_dev_serial);
   
         if (!create) {
           MQTTPayload[0] = '\0';      // If remove flag is set, send empty message to instruct auto discovery to remove the entry 
