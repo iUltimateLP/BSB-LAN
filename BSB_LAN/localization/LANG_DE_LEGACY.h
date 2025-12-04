@@ -3396,6 +3396,9 @@
 #define ENUM_INTCODE_03_27_TEXT "Alarm contact input H6" //807
 #define ENUM_INTCODE_03_28_TEXT "Alarm contact input H7" //808
 
+#define ENUM_SONDERBETRIEB_01_2e_TEXT "STB-Test"
+#define ENUM_SONDERBETRIEB_01_36_TEXT "Alternativenergie"
+
 #define ENUM_SWCODE_11_TEXT "STB Unterbruch"
 #define ENUM_SWCODE_53_TEXT "Erlaubtes Drehzahlband für Zündlast wurde bei Inbetriebsetzung nicht erreicht."
 #define ENUM_SWCODE_5f_TEXT "Drehzahlnachstellung überprüfen, vorgeschriebenes Band wird nicht erreicht."
@@ -3453,6 +3456,4 @@
 #define ENUM_WARTUNG_0a_TEXT "Batterie Außenfühler wechseln"
 #define ENUM_WARTUNG_15_TEXT "Maximale Abgastemperatur überschritten"
 #define ENUM_WARTUNG_16_TEXT "Wasserdruck 3 Heizkreis zu niedrig (Untere Druckgrenze 3 unterschritten)"
-#define ENUM_SONDERBETRIEB_01_2e_TEXT "STB-Test"
-#define ENUM_SONDERBETRIEB_01_36_TEXT "Alternativenergie"
 

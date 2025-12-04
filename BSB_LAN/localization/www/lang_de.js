@@ -142,6 +142,8 @@ UIStrings["MENU_TEXT_FSP"] = "Freier Speicher im Dateisystem";
 UIStrings["MENU_TEXT_CNV"] = "Kategorie nicht für dieses Zielgerät verfügbar.";
 
 UIStrings["STR_24A_TEXT"] = "24h Durchschnittswert";
+UIStrings["S_ERROR"] = "Aktueller Fehlercode";
+UIStrings["S_MAINT"] = "Aktueller Wartungscode";
 
 //WEBCONFIG
 UIStrings["CF_USEEEPROM_TEXT"] = "Konfiguration aus EEPROM lesen";
@@ -178,6 +180,7 @@ UIStrings["CF_MQTT_USERNAME_TEXT"] = "Username";
 UIStrings["CF_MQTT_PASSWORD_TEXT"] = "Passwort";
 UIStrings["CF_MQTT_TOPIC_TEXT"] = "Topic Präfix";
 UIStrings["CF_MQTT_DEVICE_TEXT"] = "Geräte ID";
+UIStrings["CF_MQTT_UNITS_TEXT"] = "Einheiten";
 UIStrings["CF_LOG_DEST_TEXT"] = "Speicherziel";
 UIStrings["CF_LOGMODE_TEXT"] = "Log-Modus";
 UIStrings["CF_CHECKUPDATE_TEXT"] = "Auf Updates überprüfen";
@@ -248,13 +251,13 @@ UIStrings["STR15086_TEXT"] = "Zeitschaltprogramm Sonntag";
 UIStrings["STR20100_TEXT"] = "DHT22 Sensor ID";
 UIStrings["STR20101_TEXT"] = "DHT22 Sensor Temperatur";
 UIStrings["STR20102_TEXT"] = "DHT22 Sensor Luftfeuchtigkeit";
-UIStrings["STR20103_TEXT"] = "DHT22 Sensor Abs Luftfeuchtigkeit";
+UIStrings["STR20103_TEXT"] = "DHT22 Sensor Abs. Luftfeuchtigkeit";
 UIStrings["STR20200_TEXT"] = "BME280 Sensor ID";
 UIStrings["STR20201_TEXT"] = "BME280 Sensor Temperatur";
 UIStrings["STR20202_TEXT"] = "BME280 Sensor Luftfeuchtigkeit";
-UIStrings["STR20203_TEXT"] = "BME280 Sensor Pressure";
-UIStrings["STR20204_TEXT"] = "BME280 Sensor Altitude";
-UIStrings["STR20205_TEXT"] = "BME280 Sensor Abs Luftfeuchtigkeit";
+UIStrings["STR20203_TEXT"] = "BME280 Sensor Luftdruck";
+UIStrings["STR20204_TEXT"] = "BME280 Sensor Höhe";
+UIStrings["STR20205_TEXT"] = "BME280 Sensor Abs. Luftfeuchtigkeit";
 UIStrings["STR20300_TEXT"] = "DS18B20 Sensor ID";
 UIStrings["STR20301_TEXT"] = "DS18B20 Sensor Temperatur";
 UIStrings["STR20500_TEXT"] = "MAX! Sensor ID";
@@ -277,9 +280,12 @@ UIStrings["ENUM_PPS_MODE_PASSIVE_TEXT"] = "Passiv";
 UIStrings["ENUM_PPS_MODE_QAA_TEXT"] = "Als Raumgerät";
 UIStrings["ENUM_DEBUG_SERIAL_TEXT"] = "Serial";
 UIStrings["ENUM_DEBUG_TELNET_TEXT"] = "Telnet";
-UIStrings["ENUM_MQTT_PLAIN_TEXT"] = "Plain text";
+UIStrings["ENUM_MQTT_PLAIN_TEXT"] = "Einfach";
 UIStrings["ENUM_MQTT_JSON_TEXT"] = "JSON";
 UIStrings["ENUM_MQTT_JSON2_TEXT"] = "Rich JSON";
+UIStrings["ENUM_MQTT_UNITS_LOCALIZED_TEXT"] = "Landesspezifisch";
+UIStrings["ENUM_MQTT_UNITS_HOMEASSISTANT_TEXT"] = "Home Assistant";
+UIStrings["ENUM_MQTT_UNITS_NONE_TEXT"] = "Keine";
 
 UIStrings["ENUM_WRITE_ENG_TEXT"] = "Ein (Standard)";
 UIStrings["ENUM_WRITE_OEM_TEXT"] = "Ein (Komplett)";
@@ -379,5 +385,5 @@ UIStrings["EXTIF_STARTDATE_TEXT"] = "Startdatum";
 UIStrings["EXTIF_ENDDATE_TEXT"] = "Enddatum";
 
 // only required for German language file
-#include "localization/UNDEF_LANG_DE_LEGACY.h"
-#include "localization/LANG_DE_LEGACY.h"
+#include "UNDEF_LANG_DE_LEGACY.h"
+#include "LANG_DE_LEGACY.h"
